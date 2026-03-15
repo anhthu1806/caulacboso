@@ -1,101 +1,70 @@
 import { GoogleGenAI } from "@google/genai";
-import Swal from 'sweetalert2';
 
-// Define available models in priority order for fallback
-export const MODELS = [
-  { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash (Dự phòng 1)' },
-  { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash (Mặc định)' },
-  { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro (Dự phòng 2)' },
-];
+const FALLBACK_MODELS = ['gemini-3-flash-preview', 'gemini-3-pro-preview', 'gemini-2.5-flash'];
 
-export interface AIResponse {
-  text: string;
-  error?: string;
-}
-
-export const getGeminiApiKey = (): string | null => {
-  return localStorage.getItem('gemini_api_key');
-};
-
-export const setGeminiApiKey = (key: string) => {
-  localStorage.setItem('gemini_api_key', key);
-};
-
-export const getSelectedModel = (): string => {
-  return localStorage.getItem('gemini_model') || MODELS[1].id; // Default to Gemini 2.0 Flash
-};
-
-export const setSelectedModel = (modelId: string) => {
-  localStorage.setItem('gemini_model', modelId);
-};
-
-// Fallback logic implementation
-export async function callGeminiAI(prompt: string, attemptIndex = 0): Promise<string | null> {
-  const apiKey = getGeminiApiKey();
-  
+export async function callGeminiAI(prompt: string, apiKey: string, preferredModel: string = 'gemini-3-flash-preview'): Promise<string | null> {
   if (!apiKey) {
-    Swal.fire({
-      icon: 'warning',
-      title: 'Thiếu API Key',
-      text: 'Vui lòng nhập Gemini API Key trong phần Cài đặt để sử dụng tính năng AI.',
-      confirmButtonText: 'Đã hiểu'
-    });
-    return null;
+    throw new Error('Vui lòng nhập API Key!');
   }
 
-  // Construct the list of models to try in order: 
-  // 1. User selected model
-  // 2. Fallback models (the rest of the list in order)
-  const userSelectedId = getSelectedModel();
-  const candidateModels = [
-    userSelectedId,
-    ...MODELS.map(m => m.id).filter(id => id !== userSelectedId)
-  ];
-
-  // If we've run out of models to try
-  if (attemptIndex >= candidateModels.length) {
-    Swal.fire({
-      icon: 'error',
-      title: 'Lỗi AI',
-      text: 'Tất cả các model đều không phản hồi (Đã thử hết danh sách fallback). Vui lòng kiểm tra API key hoặc thử lại sau.',
-    });
-    return "Đã dừng do lỗi: Cạn kiệt model fallback (RESOURCE_EXHAUSTED or API Error)";
-  }
-
-  const currentModelId = candidateModels[attemptIndex];
-
+  // Try the preferred model first
   try {
-    const ai = new GoogleGenAI(apiKey);
-    const model = ai.getGenerativeModel({ model: currentModelId });
-    
-    // Using the official SDK generateContent call
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
-
-    return text || '';
+    return await generateContent(apiKey, preferredModel, prompt);
   } catch (error: any) {
-    console.error(`Error calling model ${currentModelId}:`, error);
-
-    // Check for specific errors that warrant a retry (429, 503, 500, etc.)
-    const errorMsg = error.message || "";
-    const isRetryable = errorMsg.includes('429') || 
-                        errorMsg.includes('503') || 
-                        errorMsg.includes('500') ||
-                        errorMsg.includes('fetch failed') ||
-                        errorMsg.includes('deadline exceeded');
-
-    if (isRetryable && attemptIndex < candidateModels.length - 1) {
-      console.log(`Model ${currentModelId} failed with retryable error. Retrying with next model...`);
-      return callGeminiAI(prompt, attemptIndex + 1);
+    console.warn(`Model ${preferredModel} failed, trying fallbacks...`, error);
+    
+    // Try fallbacks
+    for (const model of FALLBACK_MODELS) {
+      if (model === preferredModel) continue; // Skip if already tried
+      try {
+        console.log(`Trying fallback model: ${model}`);
+        return await generateContent(apiKey, model, prompt);
+      } catch (fallbackError) {
+        console.warn(`Fallback model ${model} failed.`, fallbackError);
+        continue;
+      }
     }
-
-    // If it's a non-retryable error (e.g. invalid key 400), or we've exhausted retries, show error
-    Swal.fire({
-      icon: 'error',
-      title: 'Lỗi AI',
-      text: `Lỗi kết nối với ${currentModelId}: ${error.message}`,
-    });
-    return `Đã dừng do lỗi tại ${currentModelId}: ${error.message}`;
+    
+    throw new Error(`Lỗi API: Không thể kết nối với bất kỳ model nào. Vui lòng kiểm tra API Key hoặc thử lại sau.`);
   }
 }
+
+async function generateContent(apiKey: string, model: string, prompt: string): Promise<string> {
+  const ai = new GoogleGenAI({ apiKey });
+  const response = await ai.models.generateContent({
+    model: model,
+    contents: [{ parts: [{ text: prompt }] }],
+    config: {
+      temperature: 0.7,
+      maxOutputTokens: 4096,
+    }
+  });
+  return response.text || '';
+}
+
+export const generateExplanationPrompt = (algorithm: string, array: number[], target: number, stepDescription: string) => {
+  return `
+    Bạn là một gia sư thuật toán thân thiện và dễ hiểu.
+    Hãy giải thích ngắn gọn (dưới 50 từ) về bước hiện tại của thuật toán ${algorithm}.
+    
+    Dữ liệu hiện tại:
+    - Mảng: [${array.join(', ')}]
+    - Giá trị cần tìm: ${target}
+    - Hành động: ${stepDescription}
+    
+    Hãy giải thích tại sao thuật toán lại làm như vậy và điều gì sẽ xảy ra tiếp theo. Dùng tiếng Việt tự nhiên.
+  `;
+};
+
+export const generateQuizPrompt = (algorithm: string) => {
+  return `
+    Tạo 1 câu hỏi trắc nghiệm (4 đáp án) về thuật toán ${algorithm} bằng tiếng Việt.
+    Trả về định dạng JSON thuần túy (không markdown) như sau:
+    {
+      "question": "Nội dung câu hỏi?",
+      "options": ["A", "B", "C", "D"],
+      "correctAnswer": 0, // index của đáp án đúng (0-3)
+      "explanation": "Giải thích ngắn gọn tại sao đúng."
+    }
+  `;
+};
